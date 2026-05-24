@@ -1,0 +1,59 @@
+import { NextRequest } from "next/server";
+import { getSessionUser } from "@/lib/auth/session";
+import { ok, fail } from "@/lib/api/response";
+import {
+  createInvoiceSchema,
+  invoiceListQuerySchema,
+} from "@/lib/validators/invoice";
+import { createInvoice, listInvoices, peekNextInvoiceNumber } from "@/lib/services/invoice.service";
+
+/** 获取 Invoice 列表 / 预览下一个编号 */
+export async function GET(request: NextRequest) {
+  const user = await getSessionUser();
+  if (!user) return fail("未登录", 401, "UNAUTHORIZED");
+
+  if (request.nextUrl.searchParams.get("peekNumber") === "1") {
+    const number = await peekNextInvoiceNumber(user.id);
+    return ok({ invoiceNumber: number });
+  }
+
+  const params = Object.fromEntries(request.nextUrl.searchParams);
+  const parsed = invoiceListQuerySchema.safeParse(params);
+  if (!parsed.success) {
+    return fail(parsed.error.issues[0]?.message ?? "参数无效", 400);
+  }
+
+  const result = await listInvoices(user.id, parsed.data);
+  return ok(result.items, { meta: result.meta });
+}
+
+/** 创建 Invoice */
+export async function POST(request: NextRequest) {
+  const user = await getSessionUser();
+  if (!user) return fail("未登录", 401, "UNAUTHORIZED");
+
+  try {
+    const body = await request.json();
+    const parsed = createInvoiceSchema.safeParse(body);
+    if (!parsed.success) {
+      return fail(parsed.error.issues[0]?.message ?? "参数无效", 400);
+    }
+
+    const invoice = await createInvoice(user.id, parsed.data);
+    return ok(invoice, { status: 201 });
+  } catch (error) {
+    if (error instanceof Error) {
+      if (error.message === "CLIENT_NOT_FOUND") {
+        return fail("客户不存在", 404, "CLIENT_NOT_FOUND");
+      }
+      if (error.message === "INVOICE_LIMIT_REACHED") {
+        return fail("Free 计划每月最多 10 张 Invoice，请升级 Pro", 403, "INVOICE_LIMIT_REACHED");
+      }
+      if (error.message === "TEMPLATE_REQUIRES_PRO") {
+        return fail("该模板需要 Pro 计划，请前往设置升级", 403, "TEMPLATE_REQUIRES_PRO");
+      }
+    }
+    console.error("[invoices POST]", error);
+    return fail("创建 Invoice 失败", 500);
+  }
+}

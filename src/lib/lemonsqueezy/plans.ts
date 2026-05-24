@@ -1,0 +1,51 @@
+import type { Plan } from "@prisma/client";
+
+export type BillablePlan = "PRO" | "BUSINESS";
+
+export const PLAN_CATALOG: Record<
+  BillablePlan,
+  {
+    name: string;
+    priceLabel: string;
+    variantEnv: "LEMONSQUEEZY_VARIANT_PRO" | "LEMONSQUEEZY_VARIANT_BUSINESS";
+    features: string[];
+  }
+> = {
+  PRO: {
+    name: "Pro",
+    priceLabel: "$8.99/月",
+    variantEnv: "LEMONSQUEEZY_VARIANT_PRO",
+    features: [
+      "无限 Invoice",
+      "AI 生成发票",
+      "自动催款",
+      "数据统计",
+      "全部模板",
+    ],
+  },
+  BUSINESS: {
+    name: "Business",
+    priceLabel: "$19.9/月",
+    variantEnv: "LEMONSQUEEZY_VARIANT_BUSINESS",
+    features: [
+      "Pro 全部功能",
+      "团队协作（即将推出）",
+      "API 接口（即将推出）",
+    ],
+  },
+};
+
+/** 根据 Variant ID 解析计划 */
+export function planFromVariantId(variantId: string | number | null | undefined): Plan {
+  if (variantId == null) return "FREE";
+  const id = String(variantId);
+  if (id === process.env.LEMONSQUEEZY_VARIANT_BUSINESS) return "BUSINESS";
+  if (id === process.env.LEMONSQUEEZY_VARIANT_PRO) return "PRO";
+  return "FREE";
+}
+
+/** 获取计划对应的 Variant ID */
+export function getVariantIdForPlan(plan: BillablePlan): string | null {
+  const envKey = PLAN_CATALOG[plan].variantEnv;
+  return process.env[envKey] ?? null;
+}

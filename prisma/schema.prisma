@@ -1,0 +1,625 @@
+// Freelancer Billing Assistant — 生产级数据库 Schema
+// 阶段 2：完整关系模型，支持 Auth.js / Stripe / 催款 / 分析 / Business 预留
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ─────────────────────────────────────────────
+// 枚举
+// ─────────────────────────────────────────────
+
+enum Plan {
+  FREE
+  PRO
+  BUSINESS
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  TRIALING
+  PAST_DUE
+  CANCELED
+  INCOMPLETE
+  INCOMPLETE_EXPIRED
+  UNPAID
+  PAUSED
+}
+
+enum InvoiceStatus {
+  DRAFT
+  SENT
+  VIEWED
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+enum InvoiceTemplate {
+  STANDARD
+  MINIMAL
+  CORPORATE
+  BRANDING
+}
+
+enum PaperSize {
+  A4
+  LETTER
+}
+
+enum PaymentMethodType {
+  WISE
+  STRIPE
+  PAYPAL
+  BANK_TRANSFER
+  CRYPTO
+  OTHER
+}
+
+enum ReminderRuleType {
+  BEFORE_7_DAYS
+  BEFORE_3_DAYS
+  ON_DUE_DATE
+  OVERDUE_7_DAYS
+  OVERDUE_14_DAYS
+}
+
+enum ReminderStatus {
+  SCHEDULED
+  SENT
+  FAILED
+  SKIPPED
+  CANCELLED
+}
+
+enum EmailJobStatus {
+  PENDING
+  PROCESSING
+  SENT
+  DELIVERED
+  OPENED
+  FAILED
+  BOUNCED
+}
+
+enum EmailJobType {
+  INVOICE_SEND
+  REMINDER
+  CUSTOM
+}
+
+enum InvoiceActivityType {
+  CREATED
+  UPDATED
+  SENT
+  VIEWED
+  PAID
+  OVERDUE
+  REMINDER_SENT
+  CANCELLED
+  DUPLICATED
+  PDF_GENERATED
+  NOTE_ADDED
+}
+
+enum OrganizationRole {
+  OWNER
+  ADMIN
+  MEMBER
+}
+
+enum ApiKeyStatus {
+  ACTIVE
+  REVOKED
+}
+
+// ─────────────────────────────────────────────
+// Auth.js 核心表
+// ─────────────────────────────────────────────
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  emailVerified DateTime?
+  passwordHash  String?
+  name          String?
+  image         String?
+
+  // 用户资料（PRD 5.1）
+  companyName String? @map("company_name")
+  website     String?
+  phone       String?
+  taxId       String? @map("tax_id")
+  logoUrl     String? @map("logo_url")
+  address     String?
+  city        String?
+  state       String?
+  postalCode  String? @map("postal_code")
+  country     String?
+  locale      String  @default("en")
+  timezone    String  @default("UTC")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  accounts            Account[]
+  sessions            Session[]
+  subscription        Subscription?
+  clients             Client[]
+  invoices            Invoice[]
+  invoiceSequences    InvoiceSequence[]
+  payments            Payment[]
+  userPaymentMethods  UserPaymentMethod[]
+  reminderRules       ReminderRule[]
+  emailJobs           EmailJob[]
+  invoiceActivities   InvoiceActivity[]
+  organizationMembers OrganizationMember[]
+  apiKeys             ApiKey[]
+  taxAdviceLogs       TaxAdviceLog[]
+  aiGenerationLogs    AiGenerationLog[]
+
+  @@map("users")
+}
+
+model Account {
+  id                String  @id @default(cuid())
+  userId            String  @map("user_id")
+  type              String
+  provider          String
+  providerAccountId String  @map("provider_account_id")
+  refresh_token     String? @db.Text
+  access_token      String? @db.Text
+  expires_at        Int?
+  token_type        String?
+  scope             String?
+  id_token          String? @db.Text
+  session_state     String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([provider, providerAccountId])
+  @@index([userId])
+  @@map("accounts")
+}
+
+model Session {
+  id           String   @id @default(cuid())
+  sessionToken String   @unique @map("session_token")
+  userId       String   @map("user_id")
+  expires      DateTime
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("sessions")
+}
+
+model VerificationToken {
+  identifier String
+  token      String
+  expires    DateTime
+
+  @@id([identifier, token])
+  @@map("verification_tokens")
+}
+
+// ─────────────────────────────────────────────
+// 订阅（Lemon Squeezy 托管）
+// ─────────────────────────────────────────────
+
+model Subscription {
+  id     String @id @default(cuid())
+  userId String @unique @map("user_id")
+  plan   Plan   @default(FREE)
+
+  // 历史 Stripe 字段（保留兼容，不再写入）
+  stripeCustomerId     String? @unique @map("stripe_customer_id")
+  stripeSubscriptionId String? @unique @map("stripe_subscription_id")
+  stripePriceId        String? @map("stripe_price_id")
+
+  lemonSqueezyCustomerId     String? @map("lemon_squeezy_customer_id")
+  lemonSqueezySubscriptionId String? @unique @map("lemon_squeezy_subscription_id")
+  lemonSqueezyVariantId      String? @map("lemon_squeezy_variant_id")
+  status               SubscriptionStatus @default(ACTIVE)
+
+  currentPeriodStart DateTime? @map("current_period_start")
+  currentPeriodEnd   DateTime? @map("current_period_end")
+  cancelAtPeriodEnd  Boolean   @default(false) @map("cancel_at_period_end")
+  canceledAt         DateTime? @map("canceled_at")
+  trialEndsAt        DateTime? @map("trial_ends_at")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@map("subscriptions")
+}
+
+// ─────────────────────────────────────────────
+// Business 预留：组织与成员
+// ─────────────────────────────────────────────
+
+model Organization {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  logoUrl   String?  @map("logo_url")
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  members  OrganizationMember[]
+  apiKeys  ApiKey[]
+  invoices Invoice[]
+
+  @@map("organizations")
+}
+
+model OrganizationMember {
+  id             String           @id @default(cuid())
+  organizationId String           @map("organization_id")
+  userId         String           @map("user_id")
+  role           OrganizationRole @default(MEMBER)
+  invitedAt      DateTime         @default(now()) @map("invited_at")
+  joinedAt       DateTime?        @map("joined_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([organizationId, userId])
+  @@index([userId])
+  @@map("organization_members")
+}
+
+model ApiKey {
+  id             String       @id @default(cuid())
+  organizationId String       @map("organization_id")
+  userId         String       @map("user_id")
+  name           String
+  keyHash        String       @unique @map("key_hash")
+  keyPrefix      String       @map("key_prefix")
+  status         ApiKeyStatus @default(ACTIVE)
+  lastUsedAt     DateTime?    @map("last_used_at")
+  expiresAt      DateTime?    @map("expires_at")
+  createdAt      DateTime     @default(now()) @map("created_at")
+
+  organization Organization @relation(fields: [organizationId], references: [id], onDelete: Cascade)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([organizationId])
+  @@map("api_keys")
+}
+
+// ─────────────────────────────────────────────
+// 客户管理（PRD 5.2）
+// ─────────────────────────────────────────────
+
+model Client {
+  id          String  @id @default(cuid())
+  userId      String  @map("user_id")
+  companyName String  @map("company_name")
+  contactName String  @map("contact_name")
+  email       String
+  country     String
+  address     String?
+  city        String?
+  state       String?
+  postalCode  String? @map("postal_code")
+  vatNumber   String? @map("vat_number")
+  notes       String? @db.Text
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  user     User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  invoices Invoice[]
+
+  @@index([userId])
+  @@index([userId, deletedAt])
+  @@index([userId, companyName])
+  @@map("clients")
+}
+
+// ─────────────────────────────────────────────
+// Invoice 编号序列（INV-2026-0001）
+// ─────────────────────────────────────────────
+
+model InvoiceSequence {
+  id         String @id @default(cuid())
+  userId     String @map("user_id")
+  year       Int
+  lastNumber Int    @default(0) @map("last_number")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, year])
+  @@map("invoice_sequences")
+}
+
+// ─────────────────────────────────────────────
+// Invoice（PRD 5.3 + 设计文档）
+// ─────────────────────────────────────────────
+
+model Invoice {
+  id            String @id @default(cuid())
+  userId        String @map("user_id")
+  clientId      String @map("client_id")
+  organizationId String? @map("organization_id")
+
+  invoiceNumber String        @map("invoice_number")
+  status        InvoiceStatus @default(DRAFT)
+  template      InvoiceTemplate @default(STANDARD)
+  paperSize     PaperSize     @default(A4) @map("paper_size")
+
+  currency     String
+  subtotal     Decimal @db.Decimal(18, 2)
+  taxRate      Decimal @default(0) @map("tax_rate") @db.Decimal(5, 4)
+  taxAmount    Decimal @default(0) @map("tax_amount") @db.Decimal(18, 2)
+  totalAmount  Decimal @map("total_amount") @db.Decimal(18, 2)
+
+  invoiceDate   DateTime @default(now()) @map("invoice_date") @db.Date
+  dueDate       DateTime @map("due_date") @db.Date
+  paymentTerms  String?  @map("payment_terms")
+  notes         String?  @db.Text
+  footerSignature String? @map("footer_signature") @db.Text
+
+  // 品牌模板（Pro+）
+  brandPrimaryColor String? @map("brand_primary_color")
+  brandLogoUrl      String? @map("brand_logo_url")
+
+  // 文件存储（R2）
+  pdfUrl  String? @map("pdf_url")
+  docxUrl String? @map("docx_url")
+
+  // 在线收款
+  stripePaymentLinkId  String? @map("stripe_payment_link_id")
+  stripePaymentLinkUrl String? @map("stripe_payment_link_url")
+
+  sentAt    DateTime? @map("sent_at")
+  viewedAt  DateTime? @map("viewed_at")
+  paidAt    DateTime? @map("paid_at")
+  overdueAt DateTime? @map("overdue_at")
+
+  createdAt DateTime  @default(now()) @map("created_at")
+  updatedAt DateTime  @updatedAt @map("updated_at")
+  deletedAt DateTime? @map("deleted_at")
+
+  user         User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  client       Client        @relation(fields: [clientId], references: [id], onDelete: Restrict)
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+
+  items        InvoiceItem[]
+  payments     Payment[]
+  reminders    Reminder[]
+  emailJobs    EmailJob[]
+  activities   InvoiceActivity[]
+
+  @@index([userId])
+  @@index([userId, status])
+  @@index([userId, dueDate])
+  @@index([userId, createdAt])
+  @@unique([userId, invoiceNumber])
+  @@index([clientId])
+  @@index([status, dueDate])
+  @@map("invoices")
+}
+
+model InvoiceItem {
+  id          String  @id @default(cuid())
+  invoiceId   String  @map("invoice_id")
+  description String  @db.Text
+  quantity    Decimal @default(1) @db.Decimal(12, 4)
+  unitPrice   Decimal @map("unit_price") @db.Decimal(18, 2)
+  lineTotal   Decimal @map("line_total") @db.Decimal(18, 2)
+  sortOrder   Int     @default(0) @map("sort_order")
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([invoiceId])
+  @@map("invoice_items")
+}
+
+// ─────────────────────────────────────────────
+// 用户收款方式配置（PDF / Invoice 展示）
+// ─────────────────────────────────────────────
+
+model UserPaymentMethod {
+  id        String            @id @default(cuid())
+  userId    String            @map("user_id")
+  type      PaymentMethodType
+  label     String
+  isDefault Boolean           @default(false) @map("is_default")
+
+  // 银行 / Wise / PayPal 等结构化字段（JSON 灵活扩展）
+  accountName   String? @map("account_name")
+  accountNumber String? @map("account_number")
+  bankName      String? @map("bank_name")
+  swiftCode     String? @map("swift_code")
+  iban          String?
+  routingNumber String? @map("routing_number")
+  wiseTag       String? @map("wise_tag")
+  paypalEmail   String? @map("paypal_email")
+  cryptoAddress String? @map("crypto_address")
+  extraData     Json?   @map("extra_data")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("user_payment_methods")
+}
+
+// ─────────────────────────────────────────────
+// 收款记录（PRD 5.7）
+// ─────────────────────────────────────────────
+
+model Payment {
+  id        String  @id @default(cuid())
+  userId    String  @map("user_id")
+  invoiceId String  @map("invoice_id")
+
+  amount        Decimal           @db.Decimal(18, 2)
+  currency      String
+  fee           Decimal           @default(0) @db.Decimal(18, 2)
+  netAmount     Decimal           @map("net_amount") @db.Decimal(18, 2)
+  paymentMethod PaymentMethodType @map("payment_method")
+  paidAt        DateTime          @map("paid_at")
+  notes         String?           @db.Text
+
+  // Stripe 等外部引用
+  externalId String? @map("external_id")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([invoiceId])
+  @@index([userId, paidAt])
+  @@map("payments")
+}
+
+// ─────────────────────────────────────────────
+// 自动催款（PRD 5.8）
+// ─────────────────────────────────────────────
+
+model ReminderRule {
+  id      String           @id @default(cuid())
+  userId  String           @map("user_id")
+  type    ReminderRuleType
+  enabled Boolean          @default(true)
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, type])
+  @@map("reminder_rules")
+}
+
+model Reminder {
+  id        String         @id @default(cuid())
+  invoiceId String         @map("invoice_id")
+  type      ReminderRuleType
+  status    ReminderStatus @default(SCHEDULED)
+
+  scheduledAt DateTime  @map("scheduled_at")
+  sentAt      DateTime? @map("sent_at")
+
+  subject     String?
+  body        String?  @db.Text
+  clientReply String?  @map("client_reply") @db.Text
+  errorMessage String? @map("error_message") @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([invoiceId])
+  @@index([status, scheduledAt])
+  @@unique([invoiceId, type])
+  @@map("reminders")
+}
+
+// ─────────────────────────────────────────────
+// 邮件任务与状态追踪（PRD 5.6）
+// ─────────────────────────────────────────────
+
+model EmailJob {
+  id        String  @id @default(cuid())
+  userId    String  @map("user_id")
+  invoiceId String? @map("invoice_id")
+
+  type    EmailJobType
+  status  EmailJobStatus @default(PENDING)
+  toEmail String         @map("to_email")
+  subject String
+  body    String         @db.Text
+
+  resendId    String? @unique @map("resend_id")
+  deliveredAt DateTime? @map("delivered_at")
+  openedAt    DateTime? @map("opened_at")
+  failedAt    DateTime? @map("failed_at")
+  errorMessage String? @map("error_message") @db.Text
+  retryCount  Int       @default(0) @map("retry_count")
+
+  createdAt DateTime @default(now()) @map("created_at")
+  updatedAt DateTime @updatedAt @map("updated_at")
+
+  user    User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  invoice Invoice? @relation(fields: [invoiceId], references: [id], onDelete: SetNull)
+
+  @@index([userId])
+  @@index([invoiceId])
+  @@index([status, createdAt])
+  @@map("email_jobs")
+}
+
+// ─────────────────────────────────────────────
+// Invoice 活动时间线（设计文档 4.6）
+// ─────────────────────────────────────────────
+
+model InvoiceActivity {
+  id        String              @id @default(cuid())
+  userId    String              @map("user_id")
+  invoiceId String              @map("invoice_id")
+  type      InvoiceActivityType
+  message   String?
+  metadata  Json?
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+
+  @@index([invoiceId, createdAt])
+  @@map("invoice_activities")
+}
+
+// ─────────────────────────────────────────────
+// 国际税务助手记录（PRD 5.10，Pro+）
+// ─────────────────────────────────────────────
+
+model TaxAdviceLog {
+  id        String   @id @default(cuid())
+  userId    String   @map("user_id")
+  clientId  String?  @map("client_id")
+  country   String
+  adviceKey String   @map("advice_key")
+  content   String   @db.Text
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@map("tax_advice_logs")
+}
+
+// ─────────────────────────────────────────────
+// AI 生成记录（审计与限额统计）
+// ─────────────────────────────────────────────
+
+model AiGenerationLog {
+  id         String   @id @default(cuid())
+  userId     String   @map("user_id")
+  prompt     String   @db.Text
+  resultJson Json?    @map("result_json")
+  model      String?
+  tokensUsed Int?     @map("tokens_used")
+
+  createdAt DateTime @default(now()) @map("created_at")
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+  @@map("ai_generation_logs")
+}
